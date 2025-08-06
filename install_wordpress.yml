@@ -1,0 +1,168 @@
+---
+- name: Устанавливаем стек LAMP и WordPress на Debian
+  hosts: webservers
+  become: yes
+  vars:
+    mysql_root_user: "debian"
+    mysql_root_password: "debian"
+    mysql_wp_db: "wordpress"
+    mysql_wp_user: "wpuser"
+    mysql_wp_password: "wp_password_123"
+    wp_admin_user: "admin"
+    wp_admin_password: "admin"
+    wp_admin_email: "admin@example.com"
+    wp_url: "your_domain_or_server_ip"
+    wp_title: "My WordPress Site"
+
+  tasks:
+    - name: Команда apt update
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Устанавливаем необходимые пакеты
+      apt:
+        name:
+          - python3
+          - python3-mysqldb
+          - apache2
+          - default-mysql-server
+          - default-mysql-client
+          - php
+          - php-mysql
+          - php-curl
+          - php-gd
+          - php-mbstring
+          - php-xml
+          - php-xmlrpc
+          - php-soap
+          - php-intl
+          - php-zip
+          - libapache2-mod-php
+          - unzip
+        state: present
+
+    - name: Убедимся, что Apache запущен и включен
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+    - name: Убедимся, что MySQL запущен и включен
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Проверяем соединение MySQL
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        query: "SELECT 1"
+      register: mysql_test
+      ignore_errors: yes
+
+    - name: Создаем базу данных WordPress
+      community.mysql.mysql_db:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        name: "{{ mysql_wp_db }}"
+        state: present
+
+    - name: Создаем пользователя базы данных WordPress
+      community.mysql.mysql_user:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        name: "{{ mysql_wp_user }}"
+        password: "{{ mysql_wp_password }}"
+        host: localhost
+        priv: "{{ mysql_wp_db }}.*:ALL"
+        state: present
+
+    - name: Загрузка WordPress
+      get_url:
+        url: https://wordpress.org/latest.tar.gz
+        dest: /tmp/wordpress.tar.gz
+
+    - name: Распаковка WordPress
+      unarchive:
+        src: /tmp/wordpress.tar.gz
+        dest: /var/www/
+        remote_src: yes
+        extra_opts: [--strip-components=1]
+        creates: /var/www/wordpress/wp-config-sample.php
+
+    - name: Даем права WordPress
+      file:
+        path: /var/www/wordpress
+        state: directory
+        recurse: yes
+        owner: www-data
+        group: www-data
+
+    - name: Создаем каталог загрузок
+      file:
+        path: /var/www/wordpress/wp-content/uploads
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Настраиваем виртуальный хост Apache
+      template:
+        src: wordpress.conf.j2
+        dest: /etc/apache2/sites-available/wordpress.conf
+      notify: Restart Apache
+
+    - name: Включаем сайт WordPress
+      file:
+        src: /etc/apache2/sites-available/wordpress.conf
+        dest: /etc/apache2/sites-enabled/wordpress.conf
+        state: link
+
+    - name: Отключаем дефолт сайт
+      file:
+        path: /etc/apache2/sites-enabled/000-default.conf
+        state: absent
+
+    - name: Включаем модуль перезаписи
+      apache2_module:
+        name: rewrite
+        state: present
+      notify: Restart Apache
+
+    - name: Создаем wp-config.php
+      template:
+        src: wp-config.php.j2
+        dest: /var/www/wordpress/wp-config.php
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Устанавливаем WP-CLI
+      get_url:
+        url: https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+        dest: /usr/local/bin/wp
+        mode: '0755'
+
+    - name: Устанавливаем WordPress via WP-CLI
+      command: >
+        /usr/local/bin/wp core install
+        --path=/var/www/wordpress
+        --url={{ wp_url }}
+        --title="{{ wp_title }}"
+        --admin_user={{ wp_admin_user }}
+        --admin_password={{ wp_admin_password }}
+        --admin_email={{ wp_admin_email }}
+        --skip-email
+        --allow-root
+      args:
+        creates: /var/www/wordpress/wp-config.php
+      register: wp_install
+      changed_when: "'already installed' not in wp_install.stdout"
+
+  handlers:
+    - name: Restart Apache
+      service:
+        name: apache2
+        state: restarted
